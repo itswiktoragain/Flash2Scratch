@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "flash2scratch"
+version = "0.1.0"
+description = "Experimental ActionScript 3 / AVM2 SWF to Scratch 3 SB3 converter"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+dependencies = []
+
+[project.optional-dependencies]
+gui = ["PySide6>=6.7"]
+dev = ["pytest>=8"]
+
+[project.scripts]
+flash2scratch = "flash2scratch.cli:main"
+flash2scratch-gui = "flash2scratch.gui:main"
+
+[tool.setuptools.packages.find]
+include = ["flash2scratch*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
