@@ -7,8 +7,9 @@ from pathlib import Path
 from .as2 import parse_sources as parse_as2_sources
 from .as3 import parse_sources as parse_as3_sources
 from .compiler import AS3Compiler
-from .ffdec import detect_runtime, export_swf, find_ffdec
-from .frames import compact_frames
+from .ffdec import detect_runtime, find_ffdec
+from .ffdec_export import export_core_swf, export_selected_frames
+from .frames import choose_frame_numbers, compact_frames
 from .report import ConversionReport
 from .sb3 import Asset, ScratchProject
 from .swfxml import parse_swf_xml
@@ -34,6 +35,47 @@ def _sprite(root, cid):
         if re.search(rf"(^|\D){cid}(\D|$)", path.stem)
     ]
     return sorted(hits, key=lambda path: (len(str(path)), str(path)))[0] if hits else None
+
+
+def _frame_count_from_xml(path: Path) -> int:
+    if not path.exists():
+        return 0
+    text = path.read_text(encoding="utf-8", errors="replace")
+    for pattern in (
+        r'\bframeCount\s*=\s*"(\d+)"',
+        r'\bframecount\s*=\s*"(\d+)"',
+    ):
+        match = re.search(pattern, text, re.I)
+        if match:
+            try:
+                return int(match.group(1))
+            except ValueError:
+                pass
+    return 0
+
+
+def _exported_frame_numbers(
+    frames: list[Path], requested: list[int] | None
+) -> list[int]:
+    """Recover original frame numbers from FFDec filenames when possible."""
+    if not frames:
+        return []
+    requested_set = set(requested or [])
+    parsed: list[int] = []
+    for path in frames:
+        numbers = re.findall(r"\d+", path.stem)
+        if not numbers:
+            parsed = []
+            break
+        parsed.append(int(numbers[-1]))
+
+    if parsed and len(set(parsed)) == len(parsed):
+        if not requested_set or all(number in requested_set for number in parsed):
+            return parsed
+
+    if requested and len(requested) == len(frames):
+        return list(requested)
+    return list(range(1, len(frames) + 1))
 
 
 def convert(swf, output, *, ffdec=None, keep_temp=None):
@@ -64,17 +106,17 @@ def convert(swf, output, *, ffdec=None, keep_temp=None):
 
     if keep_temp:
         root = Path(keep_temp).expanduser().resolve()
-        result = export_swf(exe, swf, root)
-        _compile(result, output, report, runtime.vm)
+        result = export_core_swf(exe, swf, root)
+        _compile(exe, swf, result, output, report, runtime.vm)
     else:
         with tempfile.TemporaryDirectory(prefix="flash2scratch-") as temp_dir:
-            result = export_swf(exe, swf, Path(temp_dir))
-            _compile(result, output, report, runtime.vm)
+            result = export_core_swf(exe, swf, Path(temp_dir))
+            _compile(exe, swf, result, output, report, runtime.vm)
 
     return report
 
 
-def _compile(result, output, report, vm):
+def _compile(exe, swf, result, output, report, vm):
     info = parse_swf_xml(result.xml)
 
     if vm == "avm1":
@@ -87,13 +129,34 @@ def _compile(result, output, report, vm):
     report.source_files = len(program.sources)
     project = ScratchProject()
 
+    total_frames = _frame_count_from_xml(result.xml)
+    requested_frames = (
+        choose_frame_numbers(total_frames, program.text)
+        if total_frames > 0
+        else None
+    )
+    export_selected_frames(exe, swf, result, requested_frames)
+
     frames = _pngs(result.frames)
-    plan = compact_frames(frames, program.text)
+    rendered_numbers = _exported_frame_numbers(frames, requested_frames)
+    if total_frames <= 0:
+        total_frames = max(rendered_numbers, default=len(frames))
+
+    plan = compact_frames(
+        frames,
+        program.text,
+        frame_numbers=rendered_numbers,
+        total_frames=total_frames,
+    )
     report.timeline_frames_exported = plan.original_count
+    report.timeline_frames_rendered = plan.rendered_count
     report.timeline_unique_frames = plan.unique_count
     report.frame_assets = plan.kept_count
     report.duplicate_frames_removed = plan.duplicates_removed
-    report.sampled_frames_removed = plan.sampled_out
+    report.sampled_frames_removed = max(
+        0,
+        plan.original_count - plan.kept_count - plan.duplicates_removed,
+    )
     report.estimated_backdrop_memory_mb = plan.estimated_decoded_bytes / (1024 * 1024)
 
     for selected in plan.selected:
@@ -106,13 +169,12 @@ def _compile(result, output, report, vm):
     elif plan.kept_count < plan.original_count:
         report.translated.append(
             "Timeline compacted: "
-            f"{plan.original_count} rendered frames -> {plan.kept_count} Scratch backdrops"
+            f"{plan.original_count} Flash frames -> {plan.kept_count} Scratch backdrops"
         )
-        if plan.sampled_out:
-            report.warnings.append(
-                f"Long timeline sampled for Scratch safety: {plan.sampled_out} unique "
-                "rendered frames were omitted and mapped to nearby retained backdrops."
-            )
+        report.warnings.append(
+            "Long timeline compacted for Scratch/Chrome safety; omitted frames map "
+            "to nearby retained backdrops."
+        )
 
     for name in sorted(program.display_objects):
         sprite = project.sprite(name)
