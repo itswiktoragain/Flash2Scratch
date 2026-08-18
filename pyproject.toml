@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "flash2scratch"
-version = "0.1.0"
-description = "Experimental ActionScript 3 / AVM2 SWF to Scratch 3 SB3 converter"
+version = "0.2.0"
+description = "Experimental ActionScript 1/2/3 SWF to Scratch 3 SB3 converter"
 readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "MIT"}
