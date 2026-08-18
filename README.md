@@ -15,7 +15,8 @@ It extracts a SWF with JPEXS Free Flash Decompiler (FFDec), translates parts of 
 - Translates common x/y/rotation/visibility/alpha/scale and variable changes.
 - Translates `gotoAndStop`, `gotoAndPlay`, `nextFrame`, and `trace(...)` where practical.
 - Emits a `.report.txt` listing unsupported or approximated AS3 instead of silently dropping it.
-- Includes a CLI and optional PySide6 GUI.
+- Includes a CLI and PySide6 desktop GUI.
+- The GUI automatically downloads and installs the latest stable portable FFDec release from the official JPEXS GitHub repository when FFDec is missing.
 
 ## Important scope
 
@@ -26,17 +27,14 @@ Flash2Scratch therefore uses a growing compiler approach. Timeline games with na
 ## Requirements
 
 - Python 3.10+
-- JPEXS Free Flash Decompiler (FFDec). Put `ffdec` / `ffdec.sh` in `PATH`, set `FFDEC`, or pass `--ffdec`.
+- PySide6 for the desktop GUI.
+- FFDec is required for conversion, but the **desktop app installs it automatically** if it cannot find an existing installation.
+
+The automatic FFDec install is stored inside the current user's app-data directory, so it does not need to modify the Flash2Scratch repository or a system-wide program directory. You can still select your own FFDec executable in the UI, set `FFDEC`, or use `--ffdec` from the CLI.
 
 FFDec is only the SWF/AVM2 extraction front-end; the Scratch compiler and SB3 writer are Python code in this repository.
 
 ## Install
-
-```bash
-python -m pip install -e .
-```
-
-Optional GUI:
 
 ```bash
 python -m pip install -e '.[gui]'
@@ -45,17 +43,35 @@ python -m pip install -e '.[gui]'
 Development/tests:
 
 ```bash
-python -m pip install -e '.[dev]'
+python -m pip install -e '.[dev,gui]'
 pytest -q
 ```
 
-## Convert
+## Desktop app
+
+From the repository root:
+
+```bash
+python main.py
+```
+
+Or, after installation:
+
+```bash
+flash2scratch-gui
+```
+
+Choose a `.swf`, choose the destination `.sb3`, and press **Convert to Scratch 3**. Leave the FFDec field blank for automatic detection/installation.
+
+The conversion itself runs off the UI thread. Results, errors, and progress messages are marshalled back to Qt's GUI thread, so an FFDec/decompiler error can be displayed without the log widget being touched from a worker thread.
+
+## Command-line conversion
 
 ```bash
 flash2scratch game.swf game.sb3
 ```
 
-If FFDec is not in PATH:
+If FFDec is not in PATH when using the CLI:
 
 ```bash
 flash2scratch game.swf game.sb3 --ffdec /path/to/ffdec
@@ -69,20 +85,15 @@ flash2scratch game.swf game.sb3 --keep-temp ffdec-export
 
 Then open the resulting `.sb3` with **File → Load from your computer** in Scratch 3.
 
-## Desktop app
-
-```bash
-flash2scratch-gui
-```
-
 ## Architecture
 
-1. `ffdec.py` validates `DoABC` and exports AS3/assets/XML.
+1. `ffdec.py` detects/installs FFDec, validates `DoABC`, and exports AS3/assets/XML.
 2. `swfxml.py` reads stage metadata and named `PlaceObject` IDs.
 3. `as3.py` extracts AS3 functions, variables, display-object references and event listeners.
 4. `compiler.py` translates the supported AS3 subset into native Scratch blocks/state.
 5. `sb3.py` serializes Scratch targets, blocks, variables and MD5-addressed assets into `.sb3`.
 6. `converter.py` connects the pipeline and writes a conversion report.
+7. `gui.py` runs conversion in a worker thread while keeping all Qt widgets on the GUI thread.
 
 ## Planned work
 
