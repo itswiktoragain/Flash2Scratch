@@ -52,14 +52,45 @@ def _integer(value: str | None) -> int | None:
 
 
 def _kind(element: ET.Element) -> str:
-    # FFDec XML versions have used both named tag elements and generic item
-    # elements with a type/class attribute. Search both forms.
     pieces = [_local_name(element.tag)]
     for key in ("type", "class", "tagType", "name"):
         value = _attr(element, key)
         if value:
             pieces.append(value)
     return " ".join(pieces).lower()
+
+
+def _apply_dimensions_from_text(text: str, info: SWFInfo) -> None:
+    width_match = re.search(r'\bwidth\s*=\s*"([0-9.]+)"', text, re.I)
+    height_match = re.search(r'\bheight\s*=\s*"([0-9.]+)"', text, re.I)
+    if width_match and height_match:
+        try:
+            width = float(width_match.group(1))
+            height = float(height_match.group(1))
+            if width > 0 and height > 0:
+                info.width = max(1, round(width))
+                info.height = max(1, round(height))
+                return
+        except ValueError:
+            pass
+
+    rect_match = re.search(
+        r'\b(?:displayRect|displayrect|frameSize|framesize)\s*=\s*"([^"]+)"',
+        text,
+        re.I,
+    )
+    if rect_match:
+        numbers = [float(value) for value in re.findall(r"-?\d+(?:\.\d+)?", rect_match.group(1))]
+        if len(numbers) >= 4:
+            x1, y1, x2, y2 = numbers[:4]
+            width = abs(x2 - x1)
+            height = abs(y2 - y1)
+            if width > 4096 or height > 4096:
+                width /= 20.0
+                height /= 20.0
+            if width > 0 and height > 0:
+                info.width = max(1, round(width))
+                info.height = max(1, round(height))
 
 
 def _parse_with_elementtree(text: str, info: SWFInfo) -> bool:
@@ -75,7 +106,18 @@ def _parse_with_elementtree(text: str, info: SWFInfo) -> bool:
         except ValueError:
             pass
 
-    # First pass: learn which character IDs are real timeline symbols/buttons.
+    direct_width = _attr(root, "width")
+    direct_height = _attr(root, "height")
+    if direct_width and direct_height:
+        try:
+            width = float(direct_width)
+            height = float(direct_height)
+            if width > 0 and height > 0:
+                info.width = max(1, round(width))
+                info.height = max(1, round(height))
+        except ValueError:
+            pass
+
     for element in root.iter():
         kind = _kind(element)
         character_id = _integer(_attr(element, "characterId"))
@@ -93,20 +135,16 @@ def _parse_with_elementtree(text: str, info: SWFInfo) -> bool:
         character_id = _integer(_attr(element, "characterId"))
         if character_id is None:
             character_id = _integer(_attr(element, "characterID"))
-
         current_owner = owner
         if "definesprite" in kind and character_id is not None:
             current_owner = character_id
-
         if "placeobject" in kind and character_id is not None:
             raw_name = _attr(element, "name")
             name = raw_name.strip() if raw_name and raw_name.strip() else None
             depth = _integer(_attr(element, "depth"))
-            placement = Placement(character_id, name, owner, depth)
-            info.placements.append(placement)
+            info.placements.append(Placement(character_id, name, owner, depth))
             if name:
                 info.instances.setdefault(name, character_id)
-
         for child in list(element):
             walk(child, current_owner)
 
@@ -121,7 +159,6 @@ def _regex_fallback(text: str, info: SWFInfo) -> None:
             info.frame_rate = float(match.group(1))
         except ValueError:
             pass
-
     for tag in re.findall(r"<[^>]+>", text):
         lower = tag.lower()
         cid_match = re.search(r'\bcharacterid="(\d+)"', tag, re.I)
@@ -146,6 +183,7 @@ def parse_swf_xml(path: Path) -> SWFInfo:
     if not path.exists():
         return info
     text = path.read_text(encoding="utf-8", errors="replace")
+    _apply_dimensions_from_text(text, info)
     if not _parse_with_elementtree(text, info):
         _regex_fallback(text, info)
     return info
