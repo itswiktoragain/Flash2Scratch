@@ -13,6 +13,10 @@ from .frames import choose_frame_numbers, compact_frames
 from .report import ConversionReport
 from .sb3 import Asset, ScratchProject
 from .swfxml import parse_swf_xml
+from .symbols import symbol_frames
+
+
+MAX_RECONSTRUCTED_SYMBOLS = 120
 
 
 def _natural(path):
@@ -24,17 +28,6 @@ def _natural(path):
 
 def _pngs(root):
     return sorted(root.rglob("*.png"), key=_natural) if root.exists() else []
-
-
-def _sprite(root, cid):
-    if not root.exists():
-        return None
-    hits = [
-        path
-        for path in root.rglob("*.png")
-        if re.search(rf"(^|\D){cid}(\D|$)", path.stem)
-    ]
-    return sorted(hits, key=lambda path: (len(str(path)), str(path)))[0] if hits else None
 
 
 def _frame_count_from_xml(path: Path) -> int:
@@ -76,6 +69,74 @@ def _exported_frame_numbers(
     if requested and len(requested) == len(frames):
         return list(requested)
     return list(range(1, len(frames) + 1))
+
+
+def _unique_name(base: str, used: set[str]) -> str:
+    base = base.strip() or "symbol"
+    if base not in used:
+        used.add(base)
+        return base
+    suffix = 2
+    while f"{base}_{suffix}" in used:
+        suffix += 1
+    name = f"{base}_{suffix}"
+    used.add(name)
+    return name
+
+
+def _symbol_candidates(info, program):
+    """Yield likely Scratch sprite instances in priority order.
+
+    Script-referenced and explicitly named instances come first. Then add
+    top-level placed Flash symbols, including unnamed root MovieClips. Raw
+    shapes are filtered later by requiring a real FFDec symbol/button export.
+    """
+    candidates: list[tuple[str, int | None, bool]] = []
+    seen_named: set[str] = set()
+
+    for name in sorted(program.display_objects):
+        candidates.append((name, info.instances.get(name), True))
+        seen_named.add(name)
+
+    for placement in info.placements:
+        if placement.name and placement.name not in seen_named:
+            candidates.append((placement.name, placement.character_id, False))
+            seen_named.add(placement.name)
+
+    anonymous_counts: dict[int, int] = {}
+    for placement in info.placements:
+        if not placement.top_level or placement.name:
+            continue
+        cid = placement.character_id
+        # Prefer known timeline symbols/buttons. If FFDec XML did not expose
+        # definition types, the asset lookup below will still safely filter it.
+        if info.sprite_ids or info.button_ids:
+            if cid not in info.sprite_ids and cid not in info.button_ids:
+                continue
+        anonymous_counts[cid] = anonymous_counts.get(cid, 0) + 1
+        number = anonymous_counts[cid]
+        base = f"symbol_{cid}" if number == 1 else f"symbol_{cid}_{number}"
+        candidates.append((base, cid, False))
+
+    return candidates
+
+
+def _install_symbol_animation(sprite, fps: float) -> None:
+    """Approximate an autonomous Flash MovieClip timeline with costume cycling."""
+    if len(sprite.costumes) <= 1:
+        return
+    builder = sprite.blocks
+    hat = builder.add("event_whenflagclicked", top=True, x=260, y=20)
+    forever = builder.add("control_forever", parent=hat)
+    next_costume = builder.add("looks_nextcostume", parent=forever)
+    wait = builder.add(
+        "control_wait",
+        parent=next_costume,
+        inputs={"DURATION": builder.num(max(0.01, 1.0 / max(1.0, float(fps))))},
+    )
+    builder.blocks[hat]["next"] = forever
+    builder.blocks[forever]["inputs"]["SUBSTACK"] = [2, next_costume]
+    builder.blocks[next_costume]["next"] = wait
 
 
 def convert(swf, output, *, ffdec=None, keep_temp=None):
@@ -176,13 +237,54 @@ def _compile(exe, swf, result, output, report, vm):
             "to nearby retained backdrops."
         )
 
-    for name in sorted(program.display_objects):
+    # Reconstruct Flash symbol instances. Cache by character ID because many
+    # placed instances may reuse the same underlying MovieClip definition.
+    symbol_cache: dict[int, list[Path]] = {}
+    used_names: set[str] = set()
+    reconstructed = 0
+    truncated = False
+    script_objects = set(program.display_objects)
+
+    for requested_name, cid, script_referenced in _symbol_candidates(info, program):
+        if reconstructed >= MAX_RECONSTRUCTED_SYMBOLS:
+            truncated = True
+            break
+
+        name = _unique_name(requested_name, used_names)
+        paths: list[Path] = []
+        if cid is not None:
+            if cid not in symbol_cache:
+                # Search the whole FFDec export tree: sprite and button exports
+                # use separate folders, but both identify their character ID.
+                symbol_cache[cid] = symbol_frames(result.root, cid)
+            paths = symbol_cache[cid]
+
+        # Do not create empty sprites for anonymous/raw shape placements. A
+        # script-referenced object is retained even when FFDec has no bitmap
+        # export so translated logic still has a Scratch target.
+        if not paths and not script_referenced:
+            continue
+
         sprite = project.sprite(name)
-        cid = info.instances.get(name)
-        asset = _sprite(result.sprites, cid) if cid is not None else None
-        if asset:
-            sprite.costumes = [Asset(asset.read_bytes(), "png", name)]
-            report.sprite_assets += 1
+        if paths:
+            sprite.costumes = [
+                Asset(path.read_bytes(), "png", f"frame {index}")
+                for index, path in enumerate(paths, 1)
+            ]
+            report.sprite_assets += len(paths)
+            if name not in script_objects:
+                _install_symbol_animation(sprite, info.frame_rate)
+        reconstructed += 1
+
+    if reconstructed:
+        report.translated.append(
+            f"Reconstructed {reconstructed} placed/named Flash symbol sprites"
+        )
+    if truncated:
+        report.warnings.append(
+            f"Display-list reconstruction capped at {MAX_RECONSTRUCTED_SYMBOLS} symbols "
+            "to keep the Scratch project responsive."
+        )
 
     AS3Compiler(
         project,
