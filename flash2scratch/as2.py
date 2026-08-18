@@ -42,7 +42,6 @@ def _owner(raw: str | None) -> str:
 
 
 def _source_owner_hint(source: Path, root: Path) -> str | None:
-    """Use FFDec's script path when it clearly identifies a clip/button owner."""
     try:
         parts = source.relative_to(root).parts[:-1]
     except ValueError:
@@ -82,7 +81,7 @@ def _param_names(text: str) -> list[str]:
 
 def _add_handler(p, prefix, owner, event, body, index, params=None, source=None):
     name = f"__as2_{prefix}_{index}"
-    p.handlers[name] = Handler(name, body, params or [])
+    p.handlers[name] = Handler(name, body, params or [], owner, source)
     p.listeners.append(Listener(owner, event, name, source))
     if owner != "stage":
         p.display_objects.add(owner)
@@ -156,14 +155,21 @@ def parse_sources(root: Path) -> AS3Program:
         text = COMMENT_RE.sub("", raw)
         all_text.append(text)
         spans: list[tuple[int, int]] = []
+        source_owner = _source_owner_hint(source, root) or "stage"
 
         for match in FUNC_RE.finditer(text):
             start, body, end = _block_span(text, match.start())
             if end <= start:
                 continue
             p.handlers[match.group("name")] = Handler(
-                match.group("name"), body, _param_names(match.group("params") or "")
+                match.group("name"),
+                body,
+                _param_names(match.group("params") or ""),
+                source_owner,
+                source,
             )
+            if source_owner != "stage":
+                p.display_objects.add(source_owner)
             spans.append((start, end))
 
         for match in ASSIGNED_EVENT_RE.finditer(text):
@@ -183,7 +189,6 @@ def parse_sources(root: Path) -> AS3Program:
             )
             spans.append((start, end))
 
-        source_owner = _source_owner_hint(source, root) or "stage"
         for match in CLIP_EVENT_RE.finditer(text):
             start, body, end = _block_span(text, match.start())
             if end <= start:
