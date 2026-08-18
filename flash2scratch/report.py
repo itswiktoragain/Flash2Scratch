@@ -14,6 +14,8 @@ class ConversionReport:
     source_files: int = 0
     frame_assets: int = 0
     sprite_assets: int = 0
+    actionscript: str = "Unknown"
+    swf_version: int | None = None
 
     @property
     def ok(self) -> bool:
@@ -24,7 +26,9 @@ class ConversionReport:
             "Flash2Scratch conversion report",
             f"Input: {self.swf}",
             f"Output: {self.output}",
-            f"AS3 files: {self.source_files}",
+            f"SWF version: {self.swf_version if self.swf_version is not None else 'unknown'}",
+            f"Runtime: {self.actionscript}",
+            f"Script files: {self.source_files}",
             f"Timeline frames: {self.frame_assets}",
             f"Sprite assets: {self.sprite_assets}",
             f"Translated constructs: {len(self.translated)}",
@@ -33,7 +37,9 @@ class ConversionReport:
         if self.translated:
             lines += ["", "Translated:"] + [f"  + {x}" for x in self.translated]
         if self.unsupported:
-            lines += ["", "Unsupported / approximated:"] + [f"  - {x}" for x in self.unsupported]
+            lines += ["", "Unsupported / approximated:"] + [
+                f"  - {x}" for x in self.unsupported
+            ]
         if self.warnings:
             lines += ["", "Warnings:"] + [f"  ! {x}" for x in self.warnings]
         return "\n".join(lines) + "\n"
