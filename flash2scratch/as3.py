@@ -10,6 +10,8 @@ class Handler:
     name: str
     body: str
     params: list[str] = field(default_factory=list)
+    owner: str = "stage"
+    source: Path | None = None
 
 
 @dataclass
