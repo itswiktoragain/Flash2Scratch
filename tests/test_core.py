@@ -1,4 +1,4 @@
-import json,zipfile
+import json,re,zipfile
 from pathlib import Path
 from flash2scratch.as2 import parse_sources as parse_as2_sources
 from flash2scratch.as3 import parse_sources
@@ -24,4 +24,7 @@ def test_swf8_header_is_valid(tmp_path:Path):
 def test_sb3(tmp_path:Path):
     p=ScratchProject();p.global_var('score',0);p.sprite('player');o=tmp_path/'x.sb3';p.save(o)
     with zipfile.ZipFile(o) as z:
-        j=json.loads(z.read('project.json'));assert j['meta']['semver']=='3.0.0';assert all(c['md5ext'] in z.namelist() for t in j['targets'] for c in t['costumes'])
+        j=json.loads(z.read('project.json'))
+        assert j['meta']['semver']=='3.0.0'
+        assert re.match(r'^([0-9]+\.[0-9]+\.[0-9]+)($|-)',j['meta']['vm'])
+        assert all(c['md5ext'] in z.namelist() for t in j['targets'] for c in t['costumes'])
