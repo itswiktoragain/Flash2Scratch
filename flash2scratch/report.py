@@ -16,6 +16,12 @@ class ConversionReport:
     sprite_assets: int = 0
     actionscript: str = "Unknown"
     swf_version: int | None = None
+    timeline_frames_exported: int = 0
+    timeline_unique_frames: int = 0
+    duplicate_frames_removed: int = 0
+    sampled_frames_removed: int = 0
+    estimated_backdrop_memory_mb: float = 0.0
+    output_size_mb: float = 0.0
 
     @property
     def ok(self) -> bool:
@@ -29,8 +35,14 @@ class ConversionReport:
             f"SWF version: {self.swf_version if self.swf_version is not None else 'unknown'}",
             f"Runtime: {self.actionscript}",
             f"Script files: {self.source_files}",
-            f"Timeline frames: {self.frame_assets}",
+            f"Timeline frames rendered by FFDec: {self.timeline_frames_exported}",
+            f"Unique rendered frames: {self.timeline_unique_frames}",
+            f"Scratch backdrops kept: {self.frame_assets}",
+            f"Exact duplicate frames removed: {self.duplicate_frames_removed}",
+            f"Unique frames sampled out: {self.sampled_frames_removed}",
+            f"Estimated decoded backdrop memory: {self.estimated_backdrop_memory_mb:.1f} MB",
             f"Sprite assets: {self.sprite_assets}",
+            f"Output SB3 size: {self.output_size_mb:.1f} MB",
             f"Translated constructs: {len(self.translated)}",
             f"Unsupported constructs: {len(self.unsupported)}",
         ]
