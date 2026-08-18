@@ -7,7 +7,7 @@ from pathlib import Path
 
 def main() -> int:
     try:
-        from PySide6.QtCore import QObject, QThread, Signal, Slot
+        from PySide6.QtCore import Qt, QThread, Signal, Slot
         from PySide6.QtWidgets import (
             QApplication,
             QFileDialog,
@@ -28,35 +28,40 @@ def main() -> int:
         return 2
 
     from .converter import convert
+    from .ffdec import ensure_ffdec
 
-    class ConversionWorker(QObject):
-        finished = Signal(object)
+    class ConversionThread(QThread):
+        status_message = Signal(str)
+        succeeded = Signal(str, str)
         failed = Signal(str)
 
-        def __init__(self, swf: str, output: str, ffdec: str | None):
-            super().__init__()
+        def __init__(self, swf: str, output: str, ffdec: str | None, parent=None):
+            super().__init__(parent)
             self.swf = swf
             self.output = output
             self.ffdec = ffdec
 
-        @Slot()
+        def _status(self, message: str) -> None:
+            self.status_message.emit(message)
+
         def run(self) -> None:
             try:
-                report = convert(self.swf, self.output, ffdec=self.ffdec or None)
+                self._status("Checking FFDec…")
+                ffdec_path = ensure_ffdec(self.ffdec or None, status=self._status)
+                self._status("Reading and decompiling the SWF…")
+                report = convert(self.swf, self.output, ffdec=ffdec_path)
+                self.succeeded.emit(report.text(), str(report.output))
             except Exception:
                 self.failed.emit(traceback.format_exc())
-                return
-            self.finished.emit(report)
 
     class MainWindow(QMainWindow):
         def __init__(self) -> None:
             super().__init__()
-            self._thread: QThread | None = None
-            self._worker: ConversionWorker | None = None
+            self._thread: ConversionThread | None = None
 
             self.setWindowTitle("Flash2Scratch — AS3 SWF to Scratch 3")
-            self.resize(820, 590)
-            self.setMinimumSize(680, 500)
+            self.resize(840, 630)
+            self.setMinimumSize(690, 520)
             self.setAcceptDrops(True)
 
             root = QWidget(self)
@@ -83,9 +88,19 @@ def main() -> int:
             layout.addLayout(self._path_row(self.output_input, "Browse…", self.pick_output))
 
             self.ffdec_input = QLineEdit()
-            self.ffdec_input.setPlaceholderText("Optional — leave blank to auto-detect FFDec")
-            layout.addWidget(QLabel("FFDec executable"))
+            self.ffdec_input.setPlaceholderText(
+                "Optional override — leave blank and Flash2Scratch installs/detects FFDec automatically"
+            )
+            layout.addWidget(QLabel("FFDec executable (optional)"))
             layout.addLayout(self._path_row(self.ffdec_input, "Browse…", self.pick_ffdec))
+
+            ffdec_note = QLabel(
+                "FFDec is automatic: if it is missing, the latest stable portable release is downloaded "
+                "from the official JPEXS GitHub releases into your user app-data folder."
+            )
+            ffdec_note.setObjectName("note")
+            ffdec_note.setWordWrap(True)
+            layout.addWidget(ffdec_note)
 
             self.convert_button = QPushButton("Convert to Scratch 3")
             self.convert_button.setObjectName("convertButton")
@@ -101,6 +116,7 @@ def main() -> int:
 
             self.status = QLabel("Ready")
             self.status.setObjectName("status")
+            self.status.setWordWrap(True)
             layout.addWidget(self.status)
 
             layout.addWidget(QLabel("Conversion log"))
@@ -128,6 +144,10 @@ def main() -> int:
                 }
                 QLabel#status {
                     color: #526175;
+                }
+                QLabel#note {
+                    color: #64748b;
+                    font-size: 12px;
                 }
                 QLineEdit, QPlainTextEdit {
                     background: white;
@@ -246,45 +266,46 @@ def main() -> int:
             if ffdec and not Path(ffdec).is_file():
                 QMessageBox.warning(self, "FFDec not found", f"This FFDec path does not exist:\n{ffdec}")
                 return
+            if self._thread is not None and self._thread.isRunning():
+                return
 
             self.log.setPlainText(
                 "Starting conversion…\n"
                 f"SWF: {swf}\n"
                 f"SB3: {output}\n"
-                + (f"FFDec: {ffdec}\n" if ffdec else "FFDec: auto-detect\n")
+                + (f"FFDec override: {ffdec}\n" if ffdec else "FFDec: automatic detection / installation\n")
             )
-            self.status.setText("Converting…")
+            self.status.setText("Starting…")
             self.convert_button.setEnabled(False)
             self.progress.setRange(0, 0)
 
-            thread = QThread(self)
-            worker = ConversionWorker(swf, output, ffdec)
-            worker.moveToThread(thread)
-            thread.started.connect(worker.run)
-            worker.finished.connect(self._conversion_finished)
-            worker.failed.connect(self._conversion_failed)
-            worker.finished.connect(thread.quit)
-            worker.failed.connect(thread.quit)
-            worker.finished.connect(worker.deleteLater)
-            worker.failed.connect(worker.deleteLater)
-            thread.finished.connect(thread.deleteLater)
-            thread.finished.connect(self._thread_finished)
+            thread = ConversionThread(swf, output, ffdec, self)
+
+            queued = Qt.ConnectionType.QueuedConnection
+            thread.status_message.connect(self._thread_status, queued)
+            thread.succeeded.connect(self._conversion_finished, queued)
+            thread.failed.connect(self._conversion_failed, queued)
+            thread.finished.connect(self._thread_finished, queued)
 
             self._thread = thread
-            self._worker = worker
             thread.start()
 
-        @Slot(object)
-        def _conversion_finished(self, report) -> None:
+        @Slot(str)
+        def _thread_status(self, message: str) -> None:
+            self.status.setText(message)
+            self.log.appendPlainText(message)
+
+        @Slot(str, str)
+        def _conversion_finished(self, report_text: str, output: str) -> None:
             self.progress.setRange(0, 1)
             self.progress.setValue(1)
             self.convert_button.setEnabled(True)
-            self.status.setText(f"Done — {report.output}")
-            self.log.setPlainText(report.text())
+            self.status.setText(f"Done — {output}")
+            self.log.setPlainText(report_text)
             QMessageBox.information(
                 self,
                 "Conversion finished",
-                f"Scratch project created successfully:\n{report.output}",
+                f"Scratch project created successfully:\n{output}",
             )
 
         @Slot(str)
@@ -294,12 +315,18 @@ def main() -> int:
             self.convert_button.setEnabled(True)
             self.status.setText("Conversion failed")
             self.log.setPlainText(details)
-            last_line = next((line for line in reversed(details.splitlines()) if line.strip()), "Unknown error")
+            last_line = next(
+                (line for line in reversed(details.splitlines()) if line.strip()),
+                "Unknown error",
+            )
             QMessageBox.critical(self, "Conversion failed", last_line)
 
+        @Slot()
         def _thread_finished(self) -> None:
+            thread = self._thread
             self._thread = None
-            self._worker = None
+            if thread is not None:
+                thread.deleteLater()
 
         def dragEnterEvent(self, event) -> None:
             urls = event.mimeData().urls() if event.mimeData().hasUrls() else []
