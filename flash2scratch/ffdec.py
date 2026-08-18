@@ -27,6 +27,20 @@ class FFDecResult:
     xml: Path
 
 
+@dataclass(frozen=True)
+class SWFRuntime:
+    vm: str
+    swf_version: int
+
+    @property
+    def actionscript(self) -> str:
+        if self.vm == "avm2":
+            return "ActionScript 3 / AVM2"
+        if self.vm == "avm1":
+            return "ActionScript 1/2 / AVM1"
+        return "No ActionScript detected"
+
+
 _RELEASE_API = "https://api.github.com/repos/jindrapetrik/jpexs-decompiler/releases/latest"
 _RELEASE_PREFIX = "https://github.com/jindrapetrik/jpexs-decompiler/releases/download/"
 StatusCallback = Callable[[str], None]
@@ -62,7 +76,6 @@ def _locate_in(root: Path) -> Path | None:
         found.extend(root.rglob(name))
     if not found:
         return None
-
     order = {name: i for i, name in enumerate(names)}
     found.sort(
         key=lambda p: (
@@ -80,7 +93,6 @@ def find_ffdec(explicit: str | None = None) -> str:
         candidates.append(explicit)
     if os.getenv("FFDEC"):
         candidates.append(os.environ["FFDEC"])
-
     candidates += list(_runner_names())
     candidates += ["ffdec-cli.exe"]
 
@@ -260,10 +272,35 @@ def _run(ffdec: str, args: list[str]) -> str:
     return process.stdout
 
 
-def assert_as3(ffdec: str, swf: Path) -> None:
+def swf_version(swf: Path) -> int:
+    try:
+        with swf.open("rb") as handle:
+            header = handle.read(4)
+    except OSError as exc:
+        raise FFDecError(f"Could not read SWF header: {exc}") from exc
+    if len(header) < 4 or header[:3] not in (b"FWS", b"CWS", b"ZWS"):
+        raise FFDecError("The selected file is not a valid SWF file (bad SWF header).")
+    return header[3]
+
+
+def detect_runtime(ffdec: str, swf: Path) -> SWFRuntime:
+    version = swf_version(swf)
     tags = _run(ffdec, ["-dumpSWF", str(swf)])
-    if "DoABC" not in tags and "DoABCDefine" not in tags:
-        raise FFDecError("This SWF does not contain AVM2 / ActionScript 3 DoABC tags.")
+    if "DoABC" in tags or "DoABCDefine" in tags:
+        return SWFRuntime("avm2", version)
+    if "DoAction" in tags or "DoInitAction" in tags or version <= 8:
+        return SWFRuntime("avm1", version)
+    return SWFRuntime("none", version)
+
+
+def assert_as3(ffdec: str, swf: Path) -> None:
+    """Compatibility helper retained for callers that explicitly require AS3."""
+    runtime = detect_runtime(ffdec, swf)
+    if runtime.vm != "avm2":
+        raise FFDecError(
+            f"This is a valid SWF v{runtime.swf_version}, but it uses "
+            f"{runtime.actionscript}, not ActionScript 3 / AVM2."
+        )
 
 
 def export_swf(ffdec: str, swf: Path, root: Path) -> FFDecResult:
