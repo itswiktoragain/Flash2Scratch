@@ -10,7 +10,7 @@ from pathlib import Path
 
 DEFAULT_MAX_BACKDROPS = 180
 DEFAULT_DECODED_MEMORY_MB = 128
-_MIN_BACKDROPS = 8
+_MIN_BACKDROPS = 2
 
 
 @dataclass(frozen=True)
@@ -93,7 +93,6 @@ def _evenly_spaced(values: list[int], count: int) -> list[int]:
         if value not in result:
             result.append(value)
 
-    # round() can theoretically collide for tiny lists; fill any gap deterministically.
     if len(result) < count:
         for value in values:
             if value not in result:
@@ -174,8 +173,6 @@ def compact_frames(
         *(canonical_for_frame[frame] for frame in refs),
     }
 
-    # If a game statically jumps to more frames than our safety budget allows,
-    # preserve an even subset and map the rest to their nearest retained frame.
     mandatory_sorted = sorted(mandatory)
     if len(mandatory_sorted) > effective_cap:
         selected_indices = set(_evenly_spaced(mandatory_sorted, effective_cap))
@@ -186,10 +183,7 @@ def compact_frames(
         selected_indices.update(_evenly_spaced(candidates, remaining_slots))
 
     selected_sorted = sorted(selected_indices)
-    selected = [
-        SelectedFrame(index, path_for_index[index])
-        for index in selected_sorted
-    ]
+    selected = [SelectedFrame(index, path_for_index[index]) for index in selected_sorted]
 
     frame_map: dict[int, str] = {}
     selected_set = set(selected_sorted)
