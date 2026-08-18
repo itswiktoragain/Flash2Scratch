@@ -17,6 +17,7 @@ class Listener:
     owner: str
     event: str
     handler: str
+    source: Path | None = None
 
 
 @dataclass
