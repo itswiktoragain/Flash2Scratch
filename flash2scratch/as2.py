@@ -41,6 +41,31 @@ def _owner(raw: str | None) -> str:
     return raw.split(".")[0] or "stage"
 
 
+def _source_owner_hint(source: Path, root: Path) -> str | None:
+    """Use FFDec's script path when it clearly identifies a clip/button owner."""
+    try:
+        parts = source.relative_to(root).parts[:-1]
+    except ValueError:
+        parts = source.parts[:-1]
+    for raw in reversed(parts):
+        part = Path(raw).stem.strip()
+        lower = part.lower()
+        match = re.fullmatch(
+            r"(?:sprite|movieclip|clip|character|button)[_. -]*(\d+)",
+            part,
+            re.I,
+        )
+        if match:
+            return f"symbol_{int(match.group(1))}"
+        if re.fullmatch(r"[A-Za-z_$][\w$]*", part):
+            if lower in {"scripts", "script", "actions", "action", "frames", "frame"}:
+                continue
+            if lower.startswith(("frame", "doaction", "doinitaction")):
+                continue
+            return part
+    return None
+
+
 def _param_names(text: str) -> list[str]:
     names: list[str] = []
     for raw in text.split(","):
@@ -136,8 +161,9 @@ def parse_sources(root: Path) -> AS3Program:
             start, body, end = _block_span(text, match.start())
             if end <= start:
                 continue
-            name = match.group("name")
-            p.handlers[name] = Handler(name, body, _param_names(match.group("params") or ""))
+            p.handlers[match.group("name")] = Handler(
+                match.group("name"), body, _param_names(match.group("params") or "")
+            )
             spans.append((start, end))
 
         for match in ASSIGNED_EVENT_RE.finditer(text):
@@ -145,11 +171,10 @@ def parse_sources(root: Path) -> AS3Program:
             if end <= start:
                 continue
             synthetic_index += 1
-            owner = _owner(match.group("owner"))
             _add_handler(
                 p,
                 "event",
-                owner,
+                _owner(match.group("owner")),
                 EVENT_MAP[match.group("event")],
                 body,
                 synthetic_index,
@@ -158,6 +183,7 @@ def parse_sources(root: Path) -> AS3Program:
             )
             spans.append((start, end))
 
+        source_owner = _source_owner_hint(source, root) or "stage"
         for match in CLIP_EVENT_RE.finditer(text):
             start, body, end = _block_span(text, match.start())
             if end <= start:
@@ -166,7 +192,7 @@ def parse_sources(root: Path) -> AS3Program:
             _add_handler(
                 p,
                 "clip",
-                "stage",
+                source_owner,
                 clip_map[match.group("event").lower()],
                 body,
                 synthetic_index,
@@ -182,7 +208,7 @@ def parse_sources(root: Path) -> AS3Program:
             _add_handler(
                 p,
                 "button",
-                "stage",
+                source_owner,
                 button_map[match.group("event").lower()],
                 body,
                 synthetic_index,
@@ -201,7 +227,6 @@ def parse_sources(root: Path) -> AS3Program:
         value = match.group("value")
         if value is not None:
             p.variables.setdefault(match.group("name"), value.strip())
-
     for name in re.findall(
         r"\b(?:_root\.)?([A-Za-z_$][\w$]*)\s*\.\s*(?:_x|_y|_rotation|_visible|_alpha|_xscale|_yscale|_currentframe|_totalframes)\b",
         text,
