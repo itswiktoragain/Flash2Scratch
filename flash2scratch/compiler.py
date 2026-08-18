@@ -39,5 +39,32 @@ class AS3Compiler(_BehaviorCompiler):
             )
             builder.blocks[hat]["next"] = first
 
+    def _call_statement(self, builder, expr, parent, target_name, locals_map):
+        """Discard side-effect-free reporters when their value is unused."""
+        name = str(expr.value).removeprefix("_root.")
+        reporter_only = (
+            name.startswith("Math.")
+            or name
+            in {
+                "random",
+                "getTimer",
+                "Key.isDown",
+                "Number",
+                "int",
+                "String",
+                "parseInt",
+                "parseFloat",
+            }
+        )
+        if reporter_only:
+            return []
+        return super()._call_statement(
+            builder,
+            expr,
+            parent,
+            target_name,
+            locals_map,
+        )
+
 
 __all__ = ["AS3Compiler"]
