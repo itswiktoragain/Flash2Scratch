@@ -13,7 +13,6 @@ EVENT_MAP = {
     "onMouseDown": "MouseEvent.CLICK",
     "onKeyDown": "KeyboardEvent.KEY_DOWN",
 }
-
 ASSIGNED_EVENT_RE = re.compile(
     r"(?:(?P<owner>(?:_root\.)?[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\s*\.\s*)?"
     r"(?P<event>onEnterFrame|onRelease|onPress|onMouseDown|onKeyDown)"
@@ -56,10 +55,10 @@ def _param_names(text: str) -> list[str]:
     return names
 
 
-def _add_handler(p, prefix, owner, event, body, index, params=None):
+def _add_handler(p, prefix, owner, event, body, index, params=None, source=None):
     name = f"__as2_{prefix}_{index}"
     p.handlers[name] = Handler(name, body, params or [])
-    p.listeners.append(Listener(owner, event, name))
+    p.listeners.append(Listener(owner, event, name, source))
     if owner != "stage":
         p.display_objects.add(owner)
 
@@ -113,7 +112,6 @@ def parse_sources(root: Path) -> AS3Program:
     p = AS3Program(sources=files)
     all_text: list[str] = []
     synthetic_index = 0
-
     clip_map = {
         "enterframe": "Event.ENTER_FRAME",
         "mousedown": "MouseEvent.CLICK",
@@ -156,6 +154,7 @@ def parse_sources(root: Path) -> AS3Program:
                 body,
                 synthetic_index,
                 _param_names(match.group("params") or ""),
+                source,
             )
             spans.append((start, end))
 
@@ -164,7 +163,15 @@ def parse_sources(root: Path) -> AS3Program:
             if end <= start:
                 continue
             synthetic_index += 1
-            _add_handler(p, "clip", "stage", clip_map[match.group("event").lower()], body, synthetic_index)
+            _add_handler(
+                p,
+                "clip",
+                "stage",
+                clip_map[match.group("event").lower()],
+                body,
+                synthetic_index,
+                source=source,
+            )
             spans.append((start, end))
 
         for match in BUTTON_EVENT_RE.finditer(text):
@@ -172,7 +179,15 @@ def parse_sources(root: Path) -> AS3Program:
             if end <= start:
                 continue
             synthetic_index += 1
-            _add_handler(p, "button", "stage", button_map[match.group("event").lower()], body, synthetic_index)
+            _add_handler(
+                p,
+                "button",
+                "stage",
+                button_map[match.group("event").lower()],
+                body,
+                synthetic_index,
+                source=source,
+            )
             spans.append((start, end))
 
         remainder = _mask_spans(text, spans)
@@ -182,7 +197,6 @@ def parse_sources(root: Path) -> AS3Program:
 
     text = "\n".join(all_text)
     p.text = text
-
     for match in VAR_RE.finditer(text):
         value = match.group("value")
         if value is not None:
@@ -194,12 +208,10 @@ def parse_sources(root: Path) -> AS3Program:
     ):
         if name not in {"this", "_root"}:
             p.display_objects.add(name)
-
     for name in re.findall(
         r"\b(?:_root\.)?([A-Za-z_$][\w$]*)\s*\.\s*(?:gotoAndStop|gotoAndPlay|play|stop|hitTest|swapDepths|startDrag|removeMovieClip)\s*\(",
         text,
     ):
         if name not in {"this", "_root"}:
             p.display_objects.add(name)
-
     return p
