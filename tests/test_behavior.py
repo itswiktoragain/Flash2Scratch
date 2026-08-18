@@ -41,6 +41,18 @@ def test_flash8_frame_script_is_not_dropped(tmp_path: Path):
     assert "score = 5" in program.frame_scripts[0].body
 
 
+def test_clip_event_owner_can_come_from_ffdec_path(tmp_path: Path):
+    scripts = tmp_path / "scripts" / "player"
+    scripts.mkdir(parents=True)
+    (scripts / "ClipAction.as").write_text(
+        "onClipEvent(enterFrame) { _x += 2; }", encoding="utf-8"
+    )
+    program = parse_as2_sources(tmp_path / "scripts")
+    assert program.listeners
+    assert program.listeners[0].owner == "player"
+    assert "player" in program.display_objects
+
+
 def test_behavior_compiler_generates_real_game_blocks(tmp_path: Path):
     program = _program(
         tmp_path,
