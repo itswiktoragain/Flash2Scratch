@@ -24,6 +24,7 @@ class FramePlan:
     selected: list[SelectedFrame]
     frame_map: dict[int, str]
     original_count: int
+    rendered_count: int
     unique_count: int
     duplicates_removed: int
     sampled_out: int
@@ -36,12 +37,8 @@ class FramePlan:
 
 
 def referenced_frame_numbers(source_text: str) -> set[int]:
-    """Return statically referenced numeric gotoAndStop/gotoAndPlay frames."""
     refs: set[int] = set()
-    pattern = re.compile(
-        r"\bgotoAnd(?:Stop|Play)\s*\(\s*([0-9]+)\s*\)",
-        re.I,
-    )
+    pattern = re.compile(r"\bgotoAnd(?:Stop|Play)\s*\(\s*([0-9]+)\s*\)", re.I)
     for match in pattern.finditer(source_text or ""):
         try:
             value = int(match.group(1))
@@ -50,6 +47,61 @@ def referenced_frame_numbers(source_text: str) -> set[int]:
         if value > 0:
             refs.add(value)
     return refs
+
+
+def _evenly_spaced(values: list[int], count: int) -> list[int]:
+    if count <= 0 or not values:
+        return []
+    if count >= len(values):
+        return list(values)
+    if count == 1:
+        return [values[len(values) // 2]]
+    result: list[int] = []
+    last = len(values) - 1
+    for slot in range(count):
+        index = round(slot * last / (count - 1))
+        value = values[index]
+        if value not in result:
+            result.append(value)
+    if len(result) < count:
+        for value in values:
+            if value not in result:
+                result.append(value)
+                if len(result) == count:
+                    break
+    return sorted(result)
+
+
+def choose_frame_numbers(
+    total_frames: int,
+    source_text: str = "",
+    *,
+    max_frames: int = DEFAULT_MAX_BACKDROPS,
+) -> list[int]:
+    """Choose main-timeline frame numbers for FFDec to render."""
+    total_frames = max(0, int(total_frames))
+    if total_frames <= 0:
+        return []
+    max_frames = max(_MIN_BACKDROPS, int(max_frames))
+    if total_frames <= max_frames:
+        return list(range(1, total_frames + 1))
+
+    refs = {
+        frame
+        for frame in referenced_frame_numbers(source_text)
+        if 1 <= frame <= total_frames
+    }
+    mandatory = sorted({1, total_frames, *refs})
+    if len(mandatory) >= max_frames:
+        return _evenly_spaced(mandatory, max_frames)
+
+    slots = max_frames - len(mandatory)
+    mandatory_set = set(mandatory)
+    candidates = [
+        frame for frame in range(1, total_frames + 1)
+        if frame not in mandatory_set
+    ]
+    return sorted({*mandatory, *_evenly_spaced(candidates, slots)})
 
 
 def _hash_file(path: Path) -> bytes:
@@ -77,31 +129,6 @@ def _png_dimensions(path: Path) -> tuple[int, int] | None:
     return width, height
 
 
-def _evenly_spaced(values: list[int], count: int) -> list[int]:
-    if count <= 0 or not values:
-        return []
-    if count >= len(values):
-        return list(values)
-    if count == 1:
-        return [values[len(values) // 2]]
-
-    result: list[int] = []
-    last = len(values) - 1
-    for slot in range(count):
-        index = round(slot * last / (count - 1))
-        value = values[index]
-        if value not in result:
-            result.append(value)
-
-    if len(result) < count:
-        for value in values:
-            if value not in result:
-                result.append(value)
-                if len(result) == count:
-                    break
-    return sorted(result)
-
-
 def _nearest(selected_indices: list[int], frame_index: int) -> int:
     position = bisect.bisect_left(selected_indices, frame_index)
     if position <= 0:
@@ -117,35 +144,39 @@ def compact_frames(
     frames: list[Path],
     source_text: str = "",
     *,
+    frame_numbers: list[int] | None = None,
+    total_frames: int | None = None,
     max_backdrops: int = DEFAULT_MAX_BACKDROPS,
     decoded_memory_mb: int = DEFAULT_DECODED_MEMORY_MB,
 ) -> FramePlan:
-    """Build a Scratch-friendly timeline frame plan.
+    """Build a Scratch-friendly timeline plan from rendered FFDec PNGs.
 
-    FFDec may render thousands of full-frame PNGs from a very small vector SWF.
-    Loading all of those as Scratch costumes can consume hundreds of MB or more
-    after image decoding. This planner:
-
-    * removes byte-identical frames from the costume list;
-    * retains first/last and statically referenced numeric goto frames;
-    * samples long unique runs evenly;
-    * limits the result by both costume count and estimated decoded RGBA memory;
-    * maps every original Flash frame to the nearest retained Scratch backdrop.
+    The caller may pass original Flash frame numbers when FFDec rendered only a
+    selected subset. Every original frame is mapped to a retained Scratch
+    backdrop, allowing numeric gotoAndStop/gotoAndPlay calls to survive sampling.
     """
     frames = list(frames)
+    if frame_numbers is None:
+        numbers = list(range(1, len(frames) + 1))
+    else:
+        numbers = [int(value) for value in frame_numbers]
+        if len(numbers) != len(frames):
+            raise ValueError("frame_numbers must have one entry for each rendered frame")
+
+    inferred_total = max(numbers, default=0)
+    total_count = max(int(total_frames or 0), inferred_total)
     if not frames:
-        return FramePlan([], {}, 0, 0, 0, 0, 0, 0)
+        return FramePlan([], {}, total_count, 0, 0, 0, 0, 0, 0)
 
     max_backdrops = max(_MIN_BACKDROPS, int(max_backdrops))
     budget_bytes = max(16, int(decoded_memory_mb)) * 1024 * 1024
 
     first_for_digest: dict[bytes, tuple[int, Path]] = {}
     canonical_for_frame: dict[int, int] = {}
-
-    for index, path in enumerate(frames, 1):
+    for original_index, path in zip(numbers, frames):
         digest = _hash_file(path)
-        first_for_digest.setdefault(digest, (index, path))
-        canonical_for_frame[index] = first_for_digest[digest][0]
+        first_for_digest.setdefault(digest, (original_index, path))
+        canonical_for_frame[original_index] = first_for_digest[digest][0]
 
     unique = sorted(first_for_digest.values(), key=lambda item: item[0])
     unique_indices = [index for index, _ in unique]
@@ -163,16 +194,16 @@ def compact_frames(
     effective_cap = min(effective_cap, len(unique_indices))
 
     refs = {
-        frame
-        for frame in referenced_frame_numbers(source_text)
-        if 1 <= frame <= len(frames)
+        frame for frame in referenced_frame_numbers(source_text)
+        if frame in canonical_for_frame
     }
+    first_rendered = min(numbers)
+    last_rendered = max(numbers)
     mandatory = {
-        canonical_for_frame[1],
-        canonical_for_frame[len(frames)],
+        canonical_for_frame[first_rendered],
+        canonical_for_frame[last_rendered],
         *(canonical_for_frame[frame] for frame in refs),
     }
-
     mandatory_sorted = sorted(mandatory)
     if len(mandatory_sorted) > effective_cap:
         selected_indices = set(_evenly_spaced(mandatory_sorted, effective_cap))
@@ -187,9 +218,9 @@ def compact_frames(
 
     frame_map: dict[int, str] = {}
     selected_set = set(selected_sorted)
-    for original_index in range(1, len(frames) + 1):
-        canonical = canonical_for_frame[original_index]
-        if canonical in selected_set:
+    for original_index in range(1, total_count + 1):
+        canonical = canonical_for_frame.get(original_index)
+        if canonical is not None and canonical in selected_set:
             mapped = canonical
         else:
             mapped = _nearest(selected_sorted, original_index)
@@ -206,7 +237,8 @@ def compact_frames(
     return FramePlan(
         selected=selected,
         frame_map=frame_map,
-        original_count=len(frames),
+        original_count=total_count,
+        rendered_count=len(frames),
         unique_count=unique_count,
         duplicates_removed=len(frames) - unique_count,
         sampled_out=max(0, unique_count - kept_count),
