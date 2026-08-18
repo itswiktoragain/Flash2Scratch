@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from .as3 import AS3Program, Handler, Listener, COMMENT_RE, _brace_body
+from .as3 import AS3Program, COMMENT_RE, FrameScript, Handler, Listener, _brace_body
 
 
 EVENT_MAP = {
@@ -17,21 +17,22 @@ EVENT_MAP = {
 ASSIGNED_EVENT_RE = re.compile(
     r"(?:(?P<owner>(?:_root\.)?[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\s*\.\s*)?"
     r"(?P<event>onEnterFrame|onRelease|onPress|onMouseDown|onKeyDown)"
-    r"\s*=\s*function\s*\([^)]*\)\s*\{",
+    r"\s*=\s*function\s*\((?P<params>[^)]*)\)\s*\{",
     re.M,
 )
 CLIP_EVENT_RE = re.compile(
-    r"\bonClipEvent\s*\(\s*(?P<event>enterFrame|mouseDown|mouseUp|keyDown)\s*\)\s*\{",
+    r"\bonClipEvent\s*\(\s*(?P<event>enterFrame|mouseDown|mouseUp|keyDown|load)\s*\)\s*\{",
     re.I | re.M,
 )
 BUTTON_EVENT_RE = re.compile(
-    r"\bon\s*\(\s*(?P<event>release|press)\s*\)\s*\{",
+    r"\bon\s*\(\s*(?P<event>release|press|rollOver|rollOut)\s*\)\s*\{",
     re.I | re.M,
 )
-FUNC_RE = re.compile(r"\bfunction\s+([A-Za-z_$][\w$]*)\s*\([^)]*\)\s*\{", re.M)
-VAR_RE = re.compile(
-    r"\bvar\s+(?P<name>[A-Za-z_$][\w$]*)\s*(?:=\s*(?P<value>[^;]+))?;"
+FUNC_RE = re.compile(
+    r"\bfunction\s+(?P<name>[A-Za-z_$][\w$]*)\s*\((?P<params>[^)]*)\)\s*\{",
+    re.M,
 )
+VAR_RE = re.compile(r"\bvar\s+(?P<name>[A-Za-z_$][\w$]*)\s*(?:=\s*(?P<value>[^;]+))?;")
 
 
 def _owner(raw: str | None) -> str:
@@ -41,58 +42,161 @@ def _owner(raw: str | None) -> str:
     return raw.split(".")[0] or "stage"
 
 
-def _add_handler(p: AS3Program, prefix: str, owner: str, event: str, body: str, index: int) -> None:
+def _param_names(text: str) -> list[str]:
+    names: list[str] = []
+    for raw in text.split(","):
+        raw = raw.strip()
+        if not raw:
+            continue
+        raw = raw.split("=", 1)[0].strip()
+        if ":" in raw:
+            raw = raw.split(":", 1)[0].strip()
+        if re.fullmatch(r"[A-Za-z_$][\w$]*", raw):
+            names.append(raw)
+    return names
+
+
+def _add_handler(p, prefix, owner, event, body, index, params=None):
     name = f"__as2_{prefix}_{index}"
-    p.handlers[name] = Handler(name, body)
+    p.handlers[name] = Handler(name, body, params or [])
     p.listeners.append(Listener(owner, event, name))
     if owner != "stage":
         p.display_objects.add(owner)
 
 
+def _block_span(text: str, start: int) -> tuple[int, str, int]:
+    open_brace = text.find("{", start)
+    if open_brace < 0:
+        return start, "", start
+    body, end = _brace_body(text, open_brace)
+    while end < len(text) and text[end].isspace():
+        end += 1
+    if end < len(text) and text[end] == ";":
+        end += 1
+    return start, body, end
+
+
+def _mask_spans(text: str, spans: list[tuple[int, int]]) -> str:
+    chars = list(text)
+    for start, end in spans:
+        for index in range(max(0, start), min(len(chars), end)):
+            chars[index] = "\n" if chars[index] == "\n" else " "
+    return "".join(chars)
+
+
+def _frame_from_path(path: Path, root: Path) -> int | None:
+    try:
+        relative = str(path.relative_to(root))
+    except ValueError:
+        relative = str(path)
+    for pattern in (
+        r"(?i)\bframe[\s_.-]*(\d+)\b",
+        r"(?i)\bdoaction[\s_.\[\]-]*(\d+)\b",
+    ):
+        match = re.search(pattern, relative)
+        if match:
+            value = int(match.group(1))
+            if value > 0:
+                return value
+    return None
+
+
+def _has_executable_code(text: str) -> bool:
+    cleaned = re.sub(r"(?m)^\s*#(?:initclip|endinitclip).*$", "", text)
+    cleaned = re.sub(r"\b(?:var|const)\s+[A-Za-z_$][\w$]*\s*;", "", cleaned)
+    cleaned = re.sub(r"[;\s{}]+", "", cleaned)
+    return bool(cleaned)
+
+
 def parse_sources(root: Path) -> AS3Program:
     files = sorted(root.rglob("*.as")) if root.exists() else []
     p = AS3Program(sources=files)
-    text = COMMENT_RE.sub(
-        "",
-        "\n".join(f.read_text(encoding="utf-8", errors="replace") for f in files),
-    )
-    p.text = text
-
-    for match in FUNC_RE.finditer(text):
-        body, _ = _brace_body(text, text.find("{", match.start()))
-        p.handlers.setdefault(match.group(1), Handler(match.group(1), body))
-
-    # Classic timeline/movie-clip style:
-    # player.onEnterFrame = function() { ... };
-    for index, match in enumerate(ASSIGNED_EVENT_RE.finditer(text), 1):
-        body, _ = _brace_body(text, text.find("{", match.start()))
-        owner = _owner(match.group("owner"))
-        event = EVENT_MAP[match.group("event")]
-        _add_handler(p, "event", owner, event, body, index)
+    all_text: list[str] = []
+    synthetic_index = 0
 
     clip_map = {
         "enterframe": "Event.ENTER_FRAME",
         "mousedown": "MouseEvent.CLICK",
         "mouseup": "MouseEvent.CLICK",
         "keydown": "KeyboardEvent.KEY_DOWN",
+        "load": "Event.GREEN_FLAG",
     }
-    for index, match in enumerate(CLIP_EVENT_RE.finditer(text), 1):
-        body, _ = _brace_body(text, text.find("{", match.start()))
-        _add_handler(p, "clip", "stage", clip_map[match.group("event").lower()], body, index)
+    button_map = {
+        "release": "MouseEvent.CLICK",
+        "press": "MouseEvent.CLICK",
+        "rollover": "MouseEvent.MOUSE_OVER",
+        "rollout": "MouseEvent.MOUSE_OUT",
+    }
 
-    button_map = {"release": "MouseEvent.CLICK", "press": "MouseEvent.CLICK"}
-    for index, match in enumerate(BUTTON_EVENT_RE.finditer(text), 1):
-        body, _ = _brace_body(text, text.find("{", match.start()))
-        _add_handler(p, "button", "stage", button_map[match.group("event").lower()], body, index)
+    for source in files:
+        raw = source.read_text(encoding="utf-8", errors="replace")
+        text = COMMENT_RE.sub("", raw)
+        all_text.append(text)
+        spans: list[tuple[int, int]] = []
+
+        for match in FUNC_RE.finditer(text):
+            start, body, end = _block_span(text, match.start())
+            if end <= start:
+                continue
+            name = match.group("name")
+            p.handlers[name] = Handler(name, body, _param_names(match.group("params") or ""))
+            spans.append((start, end))
+
+        for match in ASSIGNED_EVENT_RE.finditer(text):
+            start, body, end = _block_span(text, match.start())
+            if end <= start:
+                continue
+            synthetic_index += 1
+            owner = _owner(match.group("owner"))
+            _add_handler(
+                p,
+                "event",
+                owner,
+                EVENT_MAP[match.group("event")],
+                body,
+                synthetic_index,
+                _param_names(match.group("params") or ""),
+            )
+            spans.append((start, end))
+
+        for match in CLIP_EVENT_RE.finditer(text):
+            start, body, end = _block_span(text, match.start())
+            if end <= start:
+                continue
+            synthetic_index += 1
+            _add_handler(p, "clip", "stage", clip_map[match.group("event").lower()], body, synthetic_index)
+            spans.append((start, end))
+
+        for match in BUTTON_EVENT_RE.finditer(text):
+            start, body, end = _block_span(text, match.start())
+            if end <= start:
+                continue
+            synthetic_index += 1
+            _add_handler(p, "button", "stage", button_map[match.group("event").lower()], body, synthetic_index)
+            spans.append((start, end))
+
+        remainder = _mask_spans(text, spans)
+        remainder = re.sub(r"(?m)^\s*#(?:initclip|endinitclip).*$", "", remainder)
+        if _has_executable_code(remainder):
+            p.frame_scripts.append(FrameScript(remainder, _frame_from_path(source, root), source))
+
+    text = "\n".join(all_text)
+    p.text = text
 
     for match in VAR_RE.finditer(text):
         value = match.group("value")
         if value is not None:
-            p.variables[match.group("name")] = value.strip()
+            p.variables.setdefault(match.group("name"), value.strip())
 
     for name in re.findall(
-        r"\b(?:_root\.)?([A-Za-z_$][\w$]*)\s*\.\s*"
-        r"(?:_x|_y|_rotation|_visible|_alpha|_xscale|_yscale)\b",
+        r"\b(?:_root\.)?([A-Za-z_$][\w$]*)\s*\.\s*(?:_x|_y|_rotation|_visible|_alpha|_xscale|_yscale|_currentframe|_totalframes)\b",
+        text,
+    ):
+        if name not in {"this", "_root"}:
+            p.display_objects.add(name)
+
+    for name in re.findall(
+        r"\b(?:_root\.)?([A-Za-z_$][\w$]*)\s*\.\s*(?:gotoAndStop|gotoAndPlay|play|stop|hitTest|swapDepths|startDrag|removeMovieClip)\s*\(",
         text,
     ):
         if name not in {"this", "_root"}:
