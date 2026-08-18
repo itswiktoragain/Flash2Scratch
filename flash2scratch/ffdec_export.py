@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 
 from .ffdec import FFDecResult, _run
@@ -38,6 +39,9 @@ def export_selected_frames(
     frame_numbers: list[int] | None,
 ) -> None:
     """Render only selected main-timeline frames using FFDec's -select option."""
+    if result.frames.exists():
+        shutil.rmtree(result.frames)
+
     args = ["-format", "frame:png"]
     if frame_numbers:
         selection = "0:" + ",".join(str(frame) for frame in sorted(set(frame_numbers)))
