@@ -7,15 +7,15 @@ from .ffdec import FFDecResult, _run
 
 
 def export_core_swf(ffdec: str, swf: Path, root: Path) -> FFDecResult:
-    """Export scripts/assets/XML without rendering every main-timeline frame."""
+    """Export scripts/symbol assets/XML without rendering every main-timeline frame."""
     root.mkdir(parents=True, exist_ok=True)
     _run(
         ffdec,
         [
             "-format",
-            "script:as,sprite:png,sound:mp3_wav",
+            "script:as,sprite:png,button:png,sound:mp3_wav",
             "-export",
-            "script,sprite,sound,symbolClass",
+            "script,sprite,button,sound,symbolClass",
             str(root),
             str(swf),
         ],
