@@ -8,6 +8,7 @@ from .as2 import parse_sources as parse_as2_sources
 from .as3 import parse_sources as parse_as3_sources
 from .compiler import AS3Compiler
 from .ffdec import detect_runtime, export_swf, find_ffdec
+from .frames import compact_frames
 from .report import ConversionReport
 from .sb3 import Asset, ScratchProject
 from .swfxml import parse_swf_xml
@@ -87,14 +88,31 @@ def _compile(result, output, report, vm):
     project = ScratchProject()
 
     frames = _pngs(result.frames)
-    report.frame_assets = len(frames)
-    for index, frame in enumerate(frames, 1):
-        project.add_stage_costume(frame, f"frame {index}")
+    plan = compact_frames(frames, program.text)
+    report.timeline_frames_exported = plan.original_count
+    report.timeline_unique_frames = plan.unique_count
+    report.frame_assets = plan.kept_count
+    report.duplicate_frames_removed = plan.duplicates_removed
+    report.sampled_frames_removed = plan.sampled_out
+    report.estimated_backdrop_memory_mb = plan.estimated_decoded_bytes / (1024 * 1024)
+
+    for selected in plan.selected:
+        project.add_stage_costume(selected.path, f"frame {selected.original_index}")
 
     if not frames:
         report.warnings.append(
             "FFDec exported no main-timeline frame PNGs; using a blank stage."
         )
+    elif plan.kept_count < plan.original_count:
+        report.translated.append(
+            "Timeline compacted: "
+            f"{plan.original_count} rendered frames -> {plan.kept_count} Scratch backdrops"
+        )
+        if plan.sampled_out:
+            report.warnings.append(
+                f"Long timeline sampled for Scratch safety: {plan.sampled_out} unique "
+                "rendered frames were omitted and mapped to nearby retained backdrops."
+            )
 
     for name in sorted(program.display_objects):
         sprite = project.sprite(name)
@@ -104,8 +122,18 @@ def _compile(result, output, report, vm):
             sprite.costumes = [Asset(asset.read_bytes(), "png", name)]
             report.sprite_assets += 1
 
-    AS3Compiler(project, program, report, info.frame_rate).compile()
+    AS3Compiler(
+        project,
+        program,
+        report,
+        info.frame_rate,
+        frame_map=plan.frame_map,
+    ).compile()
     project.save(output)
+    try:
+        report.output_size_mb = output.stat().st_size / (1024 * 1024)
+    except OSError:
+        pass
     output.with_suffix(output.suffix + ".report.txt").write_text(
         report.text(), encoding="utf-8"
     )
