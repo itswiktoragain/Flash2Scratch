@@ -1,38 +1,47 @@
 # Flash2Scratch
 
-Flash2Scratch is an experimental Python compiler that converts **ActionScript 3 / AVM2 SWF files** into **Scratch 3 `.sb3` projects** which can be opened in the normal Scratch editor.
+Flash2Scratch is an experimental Python compiler that converts **Flash SWF games using ActionScript 1, 2, or 3** into **Scratch 3 `.sb3` projects** which can be opened in the normal Scratch editor.
 
-It extracts a SWF with JPEXS Free Flash Decompiler (FFDec), translates parts of ActionScript 3 that have reasonable Scratch equivalents, preserves timeline visuals as Scratch backdrops, creates Scratch sprite proxies for named Flash display objects, and writes a native Scratch 3 project.
+It uses JPEXS Free Flash Decompiler (FFDec) as the SWF extraction/decompilation front-end, then translates supported Flash code and assets into native Scratch 3 blocks, sprites, backdrops, variables, and project data.
 
-## What works in 0.1
+## Supported Flash runtimes
 
-- Verifies AVM2 / `DoABC` ActionScript 3 bytecode.
-- Uses FFDec to export AS3 source, timeline frames, sprites, sounds and SWF XML.
+Flash2Scratch now detects the runtime instead of assuming every SWF is AS3:
+
+- **AVM1 / ActionScript 1–2** — including Flash 8-era SWFs.
+- **AVM2 / ActionScript 3** — normally Flash Player 9 and later.
+- Scriptless SWFs are still accepted for timeline/asset conversion.
+
+A Flash 8 game is normally AVM1/ActionScript 2 and does **not** contain `DoABC`; that is valid and is no longer rejected.
+
+## Current conversion support
+
+- Validates the SWF header and reports the SWF version.
+- Detects AVM1 (`DoAction` / `DoInitAction`) and AVM2 (`DoABC`).
+- Uses FFDec to export scripts, frames, sprites, sounds, symbol information, and SWF XML.
 - Packages a real Scratch 3 ZIP/SB3 with `project.json` and MD5-addressed assets.
 - Preserves exported main-timeline frames as Scratch backdrops.
 - Best-effort named Flash display-object sprite mapping.
-- Recognizes `Event.ENTER_FRAME`, `MouseEvent.CLICK`, and common `KeyboardEvent.KEY_DOWN` listeners.
-- Translates common x/y/rotation/visibility/alpha/scale and variable changes.
-- Translates `gotoAndStop`, `gotoAndPlay`, `nextFrame`, and `trace(...)` where practical.
-- Emits a `.report.txt` listing unsupported or approximated AS3 instead of silently dropping it.
-- Includes a CLI and PySide6 desktop GUI.
-- The GUI automatically downloads and installs the latest stable portable FFDec release from the official JPEXS GitHub repository when FFDec is missing.
+- AS3 event support includes `Event.ENTER_FRAME`, `MouseEvent.CLICK`, and common `KeyboardEvent.KEY_DOWN` handlers.
+- Flash 8 / AS2 support includes common `onEnterFrame`, `onRelease`, `onPress`, `onClipEvent`, `_root`, `_x`, `_y`, `_rotation`, and `Key.isDown(...)` patterns.
+- Common x/y/rotation and variable changes are translated where practical.
+- `gotoAndStop`, `gotoAndPlay`, `nextFrame`, and `trace(...)` have Scratch mappings.
+- A `.report.txt` is emitted listing unsupported or approximated code instead of silently deleting it.
+- Includes a CLI and a PySide6 desktop UI.
 
 ## Important scope
 
-There is no exact one-to-one mapping between arbitrary ActionScript 3 and Scratch. Flash has classes/inheritance, dynamic display lists, filters, BitmapData, networking, Stage3D, reflection, dynamically loaded SWFs, AIR APIs, and many other features Scratch cannot reproduce directly.
+There is no exact one-to-one mapping between arbitrary Flash code and Scratch. Flash exposes APIs and runtime behavior that Scratch simply does not have. Flash2Scratch therefore uses a growing compiler approach and reports anything it cannot faithfully represent.
 
-Flash2Scratch therefore uses a growing compiler approach. Timeline games with named MovieClips, keyboard/mouse events, and straightforward game-state logic are the best targets.
+Timeline games with named MovieClips, straightforward variables, keyboard/mouse input, and ordinary frame logic are the best targets today.
 
 ## Requirements
 
 - Python 3.10+
-- PySide6 for the desktop GUI.
-- FFDec is required for conversion, but the **desktop app installs it automatically** if it cannot find an existing installation.
+- PySide6 for the desktop UI.
+- Java, because FFDec itself runs on Java.
 
-The automatic FFDec install is stored inside the current user's app-data directory, so it does not need to modify the Flash2Scratch repository or a system-wide program directory. You can still select your own FFDec executable in the UI, set `FFDEC`, or use `--ffdec` from the CLI.
-
-FFDec is only the SWF/AVM2 extraction front-end; the Scratch compiler and SB3 writer are Python code in this repository.
+**You do not need to manually install FFDec for the desktop app.** If FFDec is missing, Flash2Scratch downloads the latest stable portable FFDec release from the official JPEXS GitHub releases and caches it in your user app-data folder.
 
 ## Install
 
@@ -40,73 +49,54 @@ FFDec is only the SWF/AVM2 extraction front-end; the Scratch compiler and SB3 wr
 python -m pip install -e '.[gui]'
 ```
 
-Development/tests:
-
-```bash
-python -m pip install -e '.[dev,gui]'
-pytest -q
-```
-
-## Desktop app
-
-From the repository root:
+## Run the desktop app
 
 ```bash
 python main.py
 ```
 
-Or, after installation:
+or after installation:
 
 ```bash
 flash2scratch-gui
 ```
 
-Choose a `.swf`, choose the destination `.sb3`, and press **Convert to Scratch 3**. Leave the FFDec field blank for automatic detection/installation.
+Choose a `.swf`, choose the output `.sb3`, and click **Convert to Scratch 3**. The UI shows the detected runtime, for example:
 
-The conversion itself runs off the UI thread. Results, errors, and progress messages are marshalled back to Qt's GUI thread, so an FFDec/decompiler error can be displayed without the log widget being touched from a worker thread.
+```text
+Detected SWF v8 — ActionScript 1/2 / AVM1
+```
 
-## Command-line conversion
+## CLI
 
 ```bash
 flash2scratch game.swf game.sb3
 ```
 
-If FFDec is not in PATH when using the CLI:
+To use a particular FFDec executable:
 
 ```bash
 flash2scratch game.swf game.sb3 --ffdec /path/to/ffdec
-```
-
-Keep intermediate exports:
-
-```bash
-flash2scratch game.swf game.sb3 --keep-temp ffdec-export
 ```
 
 Then open the resulting `.sb3` with **File → Load from your computer** in Scratch 3.
 
 ## Architecture
 
-1. `ffdec.py` detects/installs FFDec, validates `DoABC`, and exports AS3/assets/XML.
-2. `swfxml.py` reads stage metadata and named `PlaceObject` IDs.
-3. `as3.py` extracts AS3 functions, variables, display-object references and event listeners.
-4. `compiler.py` translates the supported AS3 subset into native Scratch blocks/state.
-5. `sb3.py` serializes Scratch targets, blocks, variables and MD5-addressed assets into `.sb3`.
-6. `converter.py` connects the pipeline and writes a conversion report.
-7. `gui.py` runs conversion in a worker thread while keeping all Qt widgets on the GUI thread.
+1. `ffdec.py` validates the SWF, detects AVM1/AVM2, auto-installs FFDec for the GUI, and extracts assets/source.
+2. `as2.py` parses common AVM1/ActionScript 1–2 patterns.
+3. `as3.py` parses common AVM2/ActionScript 3 patterns.
+4. `swfxml.py` reads stage metadata and named `PlaceObject` IDs.
+5. `compiler.py` translates normalized Flash logic into native Scratch blocks/state.
+6. `sb3.py` serializes Scratch targets, blocks, variables and MD5-addressed assets into `.sb3`.
+7. `converter.py` routes each SWF through the correct parser and writes the conversion report.
 
-## Planned work
+## Development
 
-- Proper AS3 AST parser.
-- Arithmetic/comparison/boolean expressions.
-- `if/else`, loops, `switch`, and function/custom-block translation.
-- Better display-list reconstruction.
-- Sounds / `SoundChannel`.
-- `hitTestObject` / `hitTestPoint` collision mapping.
-- Mouse position/buttons and dragging.
-- TextField mapping.
-- Arrays/Vectors to Scratch lists.
-- Frame labels/scenes and more faithful timeline scheduling.
+```bash
+python -m pip install -e '.[dev,gui]'
+pytest -q
+```
 
 ## Legal note
 
