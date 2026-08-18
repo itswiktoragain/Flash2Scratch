@@ -4,6 +4,8 @@ from dataclasses import dataclass,field
 from pathlib import Path
 from typing import Any
 
+from . import __version__
+
 def uid(): return uuid.uuid4().hex[:20]
 def png_size(data:bytes): return struct.unpack('>II',data[16:24]) if data[:8]==b'\x89PNG\r\n\x1a\n' and len(data)>=24 else (1,1)
 TRANSPARENT_SVG=b'<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"></svg>'
@@ -58,7 +60,7 @@ class ScratchProject:
         return o
     def to_json(self):
         self._assets={}; targets=[self._target(self.stage,0)]+[self._target(t,i+1) for i,t in enumerate(self.sprites.values())]
-        return {'targets':targets,'monitors':[],'extensions':[],'meta':{'semver':'3.0.0','vm':'flash2scratch-0.1.0','agent':'Flash2Scratch'}}
+        return {'targets':targets,'monitors':[],'extensions':[],'meta':{'semver':'3.0.0','vm':__version__,'agent':f'Flash2Scratch/{__version__}'}}
     def save(self,path:Path):
         project=self.to_json(); path.parent.mkdir(parents=True,exist_ok=True)
         with zipfile.ZipFile(path,'w',compression=zipfile.ZIP_DEFLATED) as z:
